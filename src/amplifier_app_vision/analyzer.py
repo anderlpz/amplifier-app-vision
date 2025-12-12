@@ -1,19 +1,35 @@
-"""OpenAI Vision API integration for image analysis."""
+"""Vision analysis with multi-provider support."""
 
 import logging
-import os
 from pathlib import Path
 from typing import Optional
 
-from openai import OpenAI
-
 from .image_processor import ImageProcessor
+from .providers.base import VisionRequest
+from .providers.router import ProviderRouter
 
 logger = logging.getLogger(__name__)
 
 
 class VisionAnalyzer:
-    """Analyzes images using OpenAI's GPT-4 Vision API."""
+    """Analyzes images using vision-capable AI models.
+    
+    Supports multiple providers (OpenAI, Anthropic, Google) with automatic
+    detection based on model name.
+    
+    Examples:
+        # Auto-detect provider from model
+        analyzer = VisionAnalyzer(model="gpt-4o")        # OpenAI
+        analyzer = VisionAnalyzer(model="claude-sonnet-4-20250514")  # Anthropic
+        analyzer = VisionAnalyzer(model="gemini-1.5-flash")  # Google
+        
+        # Use default (OpenAI gpt-4o)
+        analyzer = VisionAnalyzer()
+        
+        # Analyze an image
+        result = analyzer.analyze("photo.jpg", prompt="What's in this image?")
+        print(result["text"])
+    """
 
     DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant that analyzes images. 
 Provide clear, detailed descriptions and answer questions accurately based on what you see.
@@ -24,24 +40,62 @@ Be concise but thorough."""
         api_key: Optional[str] = None,
         model: str = "gpt-4o",
         quality: str = "normal",
+        provider: Optional[str] = None,
     ):
         """Initialize vision analyzer.
         
         Args:
-            api_key: OpenAI API key (or uses OPENAI_API_KEY env var)
-            model: OpenAI model with vision capabilities
-            quality: Image quality preset
+            api_key: API key (auto-detects which provider based on model)
+            model: Model identifier - auto-detects provider from name:
+                   - gpt-* → OpenAI
+                   - claude-* → Anthropic
+                   - gemini-* → Google
+            quality: Image quality preset (quick, normal, detailed, full)
+            provider: Force specific provider (overrides auto-detection)
         """
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "OpenAI API key required. Set OPENAI_API_KEY environment variable "
-                "or pass api_key parameter."
-            )
-        
         self.model = model
         self.processor = ImageProcessor(quality=quality)
-        self._client = OpenAI(api_key=self.api_key)
+        
+        # Use router to get appropriate provider
+        self._router = ProviderRouter()
+        self._provider = self._router.get_provider(
+            model=model,
+            provider=provider,
+            api_key=api_key,
+        )
+
+    def _process_image(self, image_source: str | Path) -> dict:
+        """Process image source into normalized format.
+        
+        Args:
+            image_source: File path or URL
+            
+        Returns:
+            Dict with image data and metadata
+        """
+        source_str = str(image_source)
+        
+        if source_str.startswith(("http://", "https://")):
+            return self.processor.process_url(source_str)
+        else:
+            return self.processor.process_file(Path(image_source))
+
+    def _image_to_request_format(self, image_data: dict) -> dict:
+        """Convert processed image to request format.
+        
+        Args:
+            image_data: Processed image data from ImageProcessor
+            
+        Returns:
+            Dict in format expected by VisionRequest.images
+        """
+        if "url" in image_data:
+            return {"url": image_data["url"]}
+        else:
+            return {
+                "data": image_data["data"],
+                "media_type": image_data["media_type"],
+            }
 
     def analyze(
         self,
@@ -59,62 +113,33 @@ Be concise but thorough."""
             max_tokens: Maximum response tokens
             
         Returns:
-            Dict with analysis result and metadata
+            Dict with:
+                - text: Analysis result
+                - model: Model used
+                - usage: Token usage stats
+                - image_metadata: Image processing info
         """
         # Process image
-        image_source_str = str(image_source)
+        image_data = self._process_image(image_source)
         
-        if image_source_str.startswith(("http://", "https://")):
-            image_data = self.processor.process_url(image_source_str)
-            image_content = {
-                "type": "image_url",
-                "image_url": {"url": image_data["url"]},
-            }
-        else:
-            image_data = self.processor.process_file(Path(image_source))
-            image_content = {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{image_data['media_type']};base64,{image_data['data']}"
-                },
-            }
+        # Build request
+        request = VisionRequest(
+            images=[self._image_to_request_format(image_data)],
+            prompt=prompt,
+            system_prompt=system_prompt or self.DEFAULT_SYSTEM_PROMPT,
+            max_tokens=max_tokens,
+        )
         
-        # Build messages
-        messages = [
-            {"role": "system", "content": system_prompt or self.DEFAULT_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    image_content,
-                    {"type": "text", "text": prompt},
-                ],
-            },
-        ]
+        # Delegate to provider
+        response = self._provider.analyze(request)
         
-        # Call API
-        try:
-            response = self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=max_tokens,
-            )
-            
-            result_text = response.choices[0].message.content
-            
-            return {
-                "text": result_text,
-                "model": self.model,
-                "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                },
-                "image_metadata": image_data.get("metadata", {}),
-            }
-            
-        except Exception as e:
-            logger.error(f"Vision analysis failed: {e}")
-            raise
+        # Return in expected format
+        return {
+            "text": response.text,
+            "model": response.model,
+            "usage": response.usage,
+            "image_metadata": image_data.get("metadata", {}),
+        }
 
     def analyze_multiple(
         self,
@@ -132,69 +157,44 @@ Be concise but thorough."""
             max_tokens: Maximum response tokens
             
         Returns:
-            Dict with analysis result and metadata
+            Dict with:
+                - text: Analysis result
+                - model: Model used
+                - image_count: Number of images
+                - usage: Token usage stats
+                - images_metadata: List of image processing info
         """
-        content = []
+        images = []
         all_metadata = []
         
         # Process each image
         for source in image_sources:
-            source_str = str(source)
-            
-            if source_str.startswith(("http://", "https://")):
-                image_data = self.processor.process_url(source_str)
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": image_data["url"]},
-                })
-            else:
-                image_data = self.processor.process_file(Path(source))
-                content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{image_data['media_type']};base64,{image_data['data']}"
-                    },
-                })
-            
+            image_data = self._process_image(source)
+            images.append(self._image_to_request_format(image_data))
             all_metadata.append(image_data.get("metadata", {}))
         
-        # Add text prompt
-        content.append({"type": "text", "text": prompt})
+        # Build request
+        request = VisionRequest(
+            images=images,
+            prompt=prompt,
+            system_prompt=system_prompt or self.DEFAULT_SYSTEM_PROMPT,
+            max_tokens=max_tokens,
+        )
         
-        # Build messages
-        messages = [
-            {"role": "system", "content": system_prompt or self.DEFAULT_SYSTEM_PROMPT},
-            {"role": "user", "content": content},
-        ]
+        # Delegate to provider
+        response = self._provider.analyze(request)
         
-        # Call API
-        try:
-            response = self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=max_tokens,
-            )
-            
-            result_text = response.choices[0].message.content
-            
-            return {
-                "text": result_text,
-                "model": self.model,
-                "image_count": len(image_sources),
-                "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                },
-                "images_metadata": all_metadata,
-            }
-            
-        except Exception as e:
-            logger.error(f"Multi-image analysis failed: {e}")
-            raise
+        # Return in expected format
+        return {
+            "text": response.text,
+            "model": response.model,
+            "image_count": len(image_sources),
+            "usage": response.usage,
+            "images_metadata": all_metadata,
+        }
 
     def describe(self, image_source: str | Path) -> str:
-        """Get a description of an image.
+        """Get a detailed description of an image.
         
         Args:
             image_source: File path or URL

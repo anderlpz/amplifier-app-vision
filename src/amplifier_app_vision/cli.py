@@ -28,7 +28,6 @@ def setup_logging(verbose: bool = False):
 
 @click.command()
 @click.argument("sources", nargs=-1, required=False)
-@click.option("--web", is_flag=True, help="Launch web interface in browser")
 @click.option("--prompt", "-p", type=str, default="What's in this image?", help="Analysis prompt")
 @click.option("--describe", "-d", is_flag=True, help="Get detailed description")
 @click.option("--extract-text", "-t", is_flag=True, help="Extract text from image (OCR)")
@@ -38,7 +37,6 @@ def setup_logging(verbose: bool = False):
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def cli(
     sources: tuple[str] | None,
-    web: bool,
     prompt: str,
     describe: bool,
     extract_text: bool,
@@ -52,8 +50,6 @@ def cli(
     SOURCES can be file paths or URLs to images.
 
     Examples:
-
-        vision --web  # Launch browser UI
 
         vision image.png  # Analyze single image
 
@@ -71,17 +67,10 @@ def cli(
     # Setup logging
     setup_logging(verbose)
     
-    # Handle web mode
-    if web:
-        from .web import launch_web_ui
-        launch_web_ui(verbose=verbose)
-        return
-    
     # Require sources for CLI analysis
     if not sources:
         console.print("[red]Error: Provide at least one image path or URL[/red]")
         console.print("\nUsage: vision IMAGE [IMAGE...] [OPTIONS]")
-        console.print("Or: vision --web")
         sys.exit(1)
     
     # Validate API key
