@@ -145,18 +145,12 @@ class ProviderRouter:
             return OpenAIProvider(api_key=api_key, model=model)
         
         elif provider_name == "anthropic":
-            # Phase 2: Will import AnthropicProvider
-            raise NotImplementedError(
-                "Anthropic provider coming in Phase 2. "
-                "Use model='gpt-4o' for now."
-            )
+            from .anthropic import AnthropicProvider
+            return AnthropicProvider(api_key=api_key, model=model)
         
         elif provider_name == "google":
-            # Phase 2: Will import GoogleProvider
-            raise NotImplementedError(
-                "Google provider coming in Phase 2. "
-                "Use model='gpt-4o' for now."
-            )
+            from .google import GoogleProvider
+            return GoogleProvider(api_key=api_key, model=model)
         
         else:
             raise ValueError(f"Unknown provider: {provider_name}")
