@@ -60,7 +60,12 @@ class ProviderRouter:
         provider: str, 
         explicit_key: Optional[str] = None
     ) -> str:
-        """Resolve API key from explicit param, config, or env var.
+        """Resolve API key from explicit param, Amplifier config, or env var.
+        
+        Resolution order:
+        1. Explicit api_key parameter
+        2. Amplifier config (~/.amplifier/keys.env)
+        3. Environment variables
         
         Args:
             provider: Provider name
@@ -76,8 +81,15 @@ class ProviderRouter:
         if explicit_key:
             return explicit_key
         
-        # 2. TODO: Check Amplifier config (~/.amplifier/config.yaml)
-        # This will be implemented in Phase 3
+        # 2. Check Amplifier config (~/.amplifier/keys.env)
+        try:
+            from ..config import get_api_key_from_amplifier
+            amplifier_key = get_api_key_from_amplifier(provider)
+            if amplifier_key:
+                logger.debug(f"Using API key from Amplifier config for {provider}")
+                return amplifier_key
+        except Exception as e:
+            logger.debug(f"Could not load Amplifier config: {e}")
         
         # 3. Check environment variables
         env_vars = self.API_KEY_ENV_VARS.get(provider, [])
@@ -88,7 +100,8 @@ class ProviderRouter:
         
         raise ValueError(
             f"No API key found for {provider}. "
-            f"Set {' or '.join(env_vars)} environment variable."
+            f"Set {' or '.join(env_vars)} environment variable "
+            f"or add to ~/.amplifier/keys.env"
         )
     
     def get_provider(
